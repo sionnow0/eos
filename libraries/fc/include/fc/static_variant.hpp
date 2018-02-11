@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <typeinfo>
 #include <fc/exception/exception.hpp>
+#include <boost/core/typeinfo.hpp>
 
 namespace fc {
 
@@ -24,6 +25,9 @@ struct storage_ops;
 
 template<typename X, typename... Ts>
 struct position;
+
+template<int Pos, typename... Ts>
+struct type_at;
 
 template<typename... Ts>
 struct type_info;
@@ -148,6 +152,16 @@ struct position<X, X, Ts...> {
 template<typename X, typename T, typename... Ts>
 struct position<X, T, Ts...> {
     static const int pos = position<X, Ts...>::pos != -1 ? position<X, Ts...>::pos + 1 : -1;
+};
+
+template<typename T, typename... Ts>
+struct type_at<0, T, Ts...> {
+   using type = T;
+};
+
+template<int Pos, typename T, typename... Ts>
+struct type_at<Pos, T, Ts...> {
+   using type = typename type_at<Pos - 1, Ts...>::type;
 };
 
 template<typename T, typename... Ts>
@@ -337,6 +351,12 @@ public:
 
     template<typename X>
     bool contains() const { return which() == tag<X>::value; }
+
+    template<typename X>
+    static constexpr int position() { return impl::position<X, Types...>::pos; }
+
+    template<int Pos, std::enable_if_t<Pos < impl::type_info<Types...>::size,int> = 1>
+    using type_at = typename impl::type_at<Pos, Types...>::type;
 };
 
 template<typename Result>
@@ -385,5 +405,5 @@ struct visitor {
       s.visit( to_static_variant(ar[1]) );
    }
 
-  template<typename... T> struct get_typename<T...>  { static const char* name()   { return typeid(static_variant<T...>).name();   } };
+  template<typename... T> struct get_typename { static const char* name()   { return BOOST_CORE_TYPEID(static_variant<T...>).name();   } };
 } // namespace fc

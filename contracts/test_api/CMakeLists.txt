@@ -1,2 +1,5 @@
-file(GLOB SOURCE_FILES "*.cpp")
-add_wast_target(test_api "${SOURCE_FILES}" "${CMAKE_SOURCE_DIR}/contracts" ${CMAKE_CURRENT_SOURCE_DIR})
+add_wast_executable(TARGET test_api
+  INCLUDE_FOLDERS "${STANDARD_INCLUDE_FOLDERS}"
+  LIBRARIES eosiolib
+  DESTINATION_FOLDER ${CMAKE_CURRENT_BINARY_DIR}
+)

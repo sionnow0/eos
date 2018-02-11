@@ -1,9 +1,5 @@
 var searchData=
 [
-  ['scope',['scope',['../eosc_8dox.html#a2c4c54e7eeee8a40f53dcbfde0dcab27',1,'eosc.dox']]],
-  ['signatures',['signatures',['../eosc_8dox.html#aa310f5ce702670d4a6848f2dfefcd906',1,'eosc.dox']]],
-  ['social',['social',['../struct_account.html#a9b3193bc138c923876e5f598bfd7897b',1,'Account']]],
-  ['social_5fpower',['social_power',['../struct_account.html#aa9dfb41c50dc90cbb590f3902b35d6a3',1,'Account']]],
-  ['staked_5fbalance',['staked_balance',['../eosc_8dox.html#a368a626b05f5ae8a03a0e41d2d8354f5',1,'eosc.dox']]],
-  ['sync_5ftransactions',['sync_transactions',['../eosc_8dox.html#ac0629d8b3e4b4902b3a7dbc656aa5b91',1,'eosc.dox']]]
+  ['quantity',['quantity',['../structeosiosystem_1_1transfer.html#a656a8eba1fff581c019882edb9347a91',1,'eosiosystem::transfer::quantity()'],['../structeosiosystem_1_1stakevote.html#a62971b30cb73f7865b37162ed4264e47',1,'eosiosystem::stakevote::quantity()'],['../structeosio_1_1generic__currency_1_1issue.html#ab63969c82900ca3cab6909262f83828e',1,'eosio::generic_currency::issue::quantity()'],['../structeosio_1_1generic__currency_1_1transfer.html#a3cfaf544c7e318e4a9d6bf1a5c18d44c',1,'eosio::generic_currency::transfer::quantity()'],['../structeosio_1_1native__currency_1_1transfer.html#a3ac6da9f2c14813e6a02d39064caac7e',1,'eosio::native_currency::transfer::quantity()'],['../structeosio_1_1token.html#a41378f3d965a9e6a3b2c9be37c132b2f',1,'eosio::token::quantity()'],['../structinfinite_1_1transfer.html#a2b72eb47bcc8f3221dd5a622c0169e63',1,'infinite::transfer::quantity()'],['../group__storageapi.html#gaa19dbd7b8beace25c91d274519166a37',1,'TOKEN_NAME::transfer::quantity()']]],
+  ['quote',['quote',['../structeosio_1_1price__ratio.html#ab7327aaf88b15c5f1c6adb7c4de680d4',1,'eosio::price_ratio']]]
 ];

@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['system',['system',['../namespacesystem.html',1,'']]]
+  ['currency',['currency',['../namespacecurrency.html',1,'']]]
 ];

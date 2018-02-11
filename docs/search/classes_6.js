@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['orderid',['OrderID',['../structexchange_1_1_order_i_d.html',1,'exchange']]]
+  ['generic_5fcurrency',['generic_currency',['../classeosio_1_1generic__currency.html',1,'eosio']]]
 ];

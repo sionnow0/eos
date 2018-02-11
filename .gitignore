@@ -8,7 +8,10 @@
 *.wasm
 *.s
 *.dot
-
+*.abi.hpp
+*.cmake
+\#*
+\.#*
 CMakeCache.txt
 CMakeFiles
 cmake_install.cmake
@@ -41,8 +44,10 @@ programs/cli_wallet/cli_wallet
 programs/js_operation_serializer/js_operation_serializer
 programs/witness_node/witness_node
 programs/data-dir
-programs/eosd/eosd
-programs/eosc/eosc
+programs/eos-walletd/eos-walletd
+programs/eosiod/eosiod
+programs/eosioc/eosioc
+programs/launcher/launcher
 
 tests/app_test
 tests/chain_bench
@@ -66,3 +71,7 @@ object_database/*
 
 build/*
 build-debug/*
+
+tn_data_*
+.vscode
+.DS_Store

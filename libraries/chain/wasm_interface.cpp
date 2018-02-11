@@ -1,621 +1,1096 @@
-#include <boost/function.hpp>
-#include <eos/chain/wasm_interface.hpp>
-#include <eos/chain/chain_controller.hpp>
+#include <eosio/chain/wasm_interface.hpp>
+#include <eosio/chain/apply_context.hpp>
+#include <eosio/chain/chain_controller.hpp>
+#include <eosio/chain/exceptions.hpp>
+#include <boost/core/ignore_unused.hpp>
+#include <eosio/chain/wasm_interface_private.hpp>
+#include <eosio/chain/wasm_eosio_constraints.hpp>
+#include <fc/exception/exception.hpp>
+#include <fc/crypto/sha1.hpp>
+#include <fc/io/raw.hpp>
+#include <fc/utf8.hpp>
+
+#include <Runtime/Runtime.h>
+#include "IR/Module.h"
 #include "Platform/Platform.h"
 #include "WAST/WAST.h"
+#include "IR/Operators.h"
+#include "IR/Validate.h"
+#include "IR/Types.h"
 #include "Runtime/Runtime.h"
 #include "Runtime/Linker.h"
 #include "Runtime/Intrinsics.h"
-#include "IR/Module.h"
-#include "IR/Operators.h"
-#include "IR/Validate.h"
-#include <eos/chain/key_value_object.hpp>
-#include <eos/chain/account_object.hpp>
-#include <chrono>
 
-namespace eos { namespace chain {
-   using namespace IR;
-   using namespace Runtime;
+#include <boost/asio.hpp>
+#include <boost/bind.hpp>
 
-   wasm_interface::wasm_interface() {
-   }
+#include <mutex>
+#include <thread>
+#include <condition_variable>
 
-#ifdef NDEBUG
-   const int CHECKTIME_LIMIT = 2000;
-#else
-   const int CHECKTIME_LIMIT = 12000;
+
+
+using namespace IR;
+using namespace Runtime;
+using boost::asio::io_service;
+
+#if 0
+   // account.h/hpp expected account API balance interchange format
+   // must match account.hpp account_balance definition
+   PACKED_STRUCT(
+   struct account_balance
+   {
+      /**
+      * Name of the account who's balance this is
+      */
+      account_name account;
+
+      /**
+      * Balance for this account
+      */
+      asset eos_balance;
+
+      /**
+      * Staked balance for this account
+      */
+      asset staked_balance;
+
+      /**
+      * Unstaking balance for this account
+      */
+      asset unstaking_balance;
+
+      /**
+      * Time at which last unstaking occurred for this account
+      */
+      time last_unstaking_time;
+   })
 #endif
 
-DEFINE_INTRINSIC_FUNCTION0(env,checktime,checktime,none) {
-   auto dur = wasm_interface::get().current_execution_time();
-   if (dur > CHECKTIME_LIMIT) {
-      wlog("checktime called ${d}", ("d", dur));
-      throw checktime_exceeded();
-   }
-}
-   template <typename Function>
-   int32_t validate_i128i128(int32_t valueptr, int32_t valuelen, Function&& func) {
-      
-      static const uint32_t keylen = 2*sizeof(uint128_t);
-      
-      FC_ASSERT( valuelen >= keylen, "insufficient data passed" );
-
-      auto& wasm  = wasm_interface::get();
-      FC_ASSERT( wasm.current_apply_context, "no apply context found" );
-
-      char* value = memoryArrayPtr<char>( wasm.current_memory, valueptr, valuelen );
-      uint128_t*  primary = reinterpret_cast<uint128_t*>(value);
-      uint128_t*  secondary = primary + 1;
-      
-      valuelen -= keylen;
-      value    += keylen;
-
-      return func(wasm.current_apply_context, primary, secondary, value, valuelen);
-   }
-
-   template <typename Function>
-   int32_t validate_i64(int32_t valueptr, int32_t valuelen, Function&& func) {
-
-      static const uint32_t keylen = sizeof(uint64_t);
-      
-      FC_ASSERT( valuelen >= keylen );
-
-      auto& wasm  = wasm_interface::get();
-      FC_ASSERT( wasm.current_apply_context, "no apply context found" );
-
-      auto  mem   = wasm.current_memory;
-      char* value = memoryArrayPtr<char>( mem, valueptr, valuelen);
-      uint64_t* key = reinterpret_cast<uint64_t*>(value);
-
-      valuelen -= keylen;
-      value    += keylen;
-      
-      return func(wasm.current_apply_context, key, value, valuelen);
-   }
-
-#define READ_i64_OBJ(func_name) \
-   validate_i64(valueptr, valuelen, [&](apply_context* ctx, uint64_t* key, char *data, uint32_t datalen) -> int32_t { \
-      auto res = ctx->func_name( Name(scope), Name(code), Name(table), key, data, datalen); \
-      if (res >= 0) res += sizeof(uint64_t); \
-      return res; \
-   });
-
-#define UPDATE_i64_OBJ(func_name, data_size) \
-   validate_i64(valueptr, data_size, [&](apply_context* ctx, uint64_t* key, char *data, uint32_t datalen) -> int32_t { \
-      return ctx->func_name( Name(scope), Name(ctx->code.value), Name(table), key, data, datalen); \
-   });
-
-#define READ_i128i128_OBJ(func_name) \
-   validate_i128i128(valueptr, valuelen, [&](apply_context* ctx, uint128_t* primary, uint128_t* secondary, char *data, uint32_t datalen) -> int32_t { \
-      auto res = ctx->func_name( Name(scope), Name(code), Name(table), primary, secondary, data, datalen); \
-      if (res >= 0) res += 2*sizeof(uint128_t); \
-      return res; \
-   });
-
-#define UPDATE_i128i128_OBJ(func_name, data_size) \
-   validate_i128i128(valueptr, data_size, [&](apply_context* ctx, uint128_t* primary, uint128_t* secondary, char *data, uint32_t datalen) -> int32_t { \
-      return ctx->func_name( Name(scope), Name(ctx->code.value), Name(table), primary, secondary, data, datalen); \
-   });
-
-
-DEFINE_INTRINSIC_FUNCTION3(env, assert_sha256,assert_sha256,none,i32,dataptr,i32,datalen,i32,hash) {
-   FC_ASSERT( datalen > 0 );
-
-   auto& wasm  = wasm_interface::get();
-   auto  mem          = wasm.current_memory;
-
-   char* data = memoryArrayPtr<char>( mem, dataptr, datalen );
-   const auto& v = memoryRef<fc::sha256>( mem, hash );
-
-   auto result = fc::sha256::hash( data, datalen );
-   FC_ASSERT( result == v, "hash miss match" );
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env,sha256,sha256,none,i32,dataptr,i32,datalen,i32,hash) {
-   FC_ASSERT( datalen > 0 );
-
-   auto& wasm  = wasm_interface::get();
-   auto  mem          = wasm.current_memory;
-
-   char* data = memoryArrayPtr<char>( mem, dataptr, datalen );
-   auto& v = memoryRef<fc::sha256>( mem, hash );
-   v  = fc::sha256::hash( data, datalen );
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,multeq_i128,multeq_i128,none,i32,self,i32,other) {
-   auto& wasm  = wasm_interface::get();
-   auto  mem   = wasm.current_memory;
-   auto& v = memoryRef<unsigned __int128>( mem, self );
-   const auto& o = memoryRef<const unsigned __int128>( mem, other );
-   v *= o;
-}
-
-
-DEFINE_INTRINSIC_FUNCTION2(env,diveq_i128,diveq_i128,none,i32,self,i32,other) {
-   auto& wasm  = wasm_interface::get();
-   auto  mem          = wasm.current_memory;
-   auto& v = memoryRef<unsigned __int128>( mem, self );
-   const auto& o = memoryRef<const unsigned __int128>( mem, other );
-   FC_ASSERT( o != 0, "divide by zero" );
-   v /= o;
-}
-
-DEFINE_INTRINSIC_FUNCTION0(env,now,now,i32) {
-   return wasm_interface::get().current_validate_context->controller.head_block_time().sec_since_epoch();
-}
-
-DEFINE_INTRINSIC_FUNCTION4(env,store_i64,store_i64,i32,i64,scope,i64,table,i32,valueptr,i32,valuelen) {
-   return UPDATE_i64_OBJ(store_i64, valuelen);
-}
-
-DEFINE_INTRINSIC_FUNCTION4(env,update_i64,update_i64,i32,i64,scope,i64,table,i32,valueptr,i32,valuelen) {
-   return UPDATE_i64_OBJ(update_i64, valuelen);
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env,remove_i64,remove_i64,i32,i64,scope,i64,table,i32,valueptr) {
-   return UPDATE_i64_OBJ(remove_i64, sizeof(uint64_t));
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,load_i64,load_i64,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i64_OBJ(load_i64);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,front_i64,front_i64,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i64_OBJ(front_i64);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,back_i64,back_i64,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i64_OBJ(back_i64);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,next_i64,next_i64,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i64_OBJ(next_i64);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,previous_i64,previous_i64,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i64_OBJ(previous_i64);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,lower_bound_i64,lower_bound_i64,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i64_OBJ(lower_bound_i64);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,upper_bound_i64,upper_bound_i64,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i64_OBJ(upper_bound_i64);
-}
-
-struct i128_keys {
-   uint128_t primary;
-   uint128_t secondary;
-};
-
-DEFINE_INTRINSIC_FUNCTION4(env,store_i128i128,store_i128i128,i32,i64,scope,i64,table,i32,valueptr,i32,valuelen) {
-   return UPDATE_i128i128_OBJ(store_i128i128, valuelen);
-}
-
-DEFINE_INTRINSIC_FUNCTION4(env,update_i128i128,update_i128i128,i32,i64,scope,i64,table,i32,valueptr,i32,valuelen) {
-   return UPDATE_i128i128_OBJ(update_i128i128, valuelen);
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env,remove_i128i128,remove_i128i128,i32,i64,scope,i64,table,i32,valueptr) {
-   return UPDATE_i128i128_OBJ(remove_i128i128, 2*sizeof(uint128_t));
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,load_primary_i128i128,load_primary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(load_primary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,front_primary_i128i128,front_primary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(front_primary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,back_primary_i128i128,back_primary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(back_primary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,next_primary_i128i128,next_primary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(next_primary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,previous_primary_i128i128,previous_primary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(previous_primary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,upper_bound_primary_i128i128,upper_bound_primary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(upper_bound_primary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,lower_bound_primary_i128i128,lower_bound_primary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(lower_bound_primary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,load_secondary_i128i128,load_secondary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(load_secondary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,back_secondary_i128i128,back_secondary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(back_secondary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,front_secondary_i128i128,front_secondary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(front_secondary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,next_secondary_i128i128,next_secondary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(next_secondary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,previous_secondary_i128i128,previous_secondary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(previous_secondary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,upper_bound_secondary_i128i128,upper_bound_secondary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(upper_bound_secondary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION5(env,lower_bound_secondary_i128i128,lower_bound_secondary_i128i128,i32,i64,scope,i64,code,i64,table,i32,valueptr,i32,valuelen) {
-   return READ_i128i128_OBJ(lower_bound_secondary_i128i128);
-}
-
-DEFINE_INTRINSIC_FUNCTION0(env,currentCode,currentCode,i64) {
-   auto& wasm  = wasm_interface::get();
-   return wasm.current_validate_context->code.value;
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,requireAuth,requireAuth,none,i64,account) {
-   wasm_interface::get().current_validate_context->require_authorization( Name(account) );
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,requireNotice,requireNotice,none,i64,account) {
-   wasm_interface::get().current_apply_context->require_recipient( account );
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,requireScope,requireScope,none,i64,scope) {
-   wasm_interface::get().current_validate_context->require_scope( scope );
-}
-
-DEFINE_INTRINSIC_FUNCTION3(env,memcpy,memcpy,i32,i32,dstp,i32,srcp,i32,len) {
-   auto& wasm          = wasm_interface::get();
-   auto  mem           = wasm.current_memory;
-   char* dst           = memoryArrayPtr<char>( mem, dstp, len);
-   const char* src     = memoryArrayPtr<const char>( mem, srcp, len );
-   FC_ASSERT( len > 0 );
-
-   if( dst > src )
-      FC_ASSERT( dst >= (src + len), "overlap of memory range is undefined", ("d",dstp)("s",srcp)("l",len) );
-   else
-      FC_ASSERT( src >= (dst + len), "overlap of memory range is undefined", ("d",dstp)("s",srcp)("l",len) );
-
-   memcpy( dst, src, uint32_t(len) );
-   return dstp;
-}
-
-
-DEFINE_INTRINSIC_FUNCTION2(env,send,send,i32,i32,trx_buffer, i32,trx_buffer_size ) {
-   auto& wasm  = wasm_interface::get();
-   auto  mem   = wasm.current_memory;
-   const char* buffer = &memoryRef<const char>( mem, trx_buffer );
-
-   FC_ASSERT( trx_buffer_size > 0 );
-   FC_ASSERT( wasm.current_apply_context, "not in apply context" );
-
-   fc::datastream<const char*> ds(buffer, trx_buffer_size );
-   eos::chain::GeneratedTransaction gtrx;
-   eos::chain::Transaction& trx = gtrx;
-   fc::raw::unpack( ds, trx );
-
-/**
- *  The code below this section provides sanity checks that the generated message is well formed
- *  before being accepted. These checks do not need to be applied during reindex.
- */
-#warning TODO: reserve per-thread static memory for MAX TRX SIZE 
-/** make sure that packing what we just unpacked produces expected output */
-   auto test = fc::raw::pack( trx );
-   FC_ASSERT( 0 == memcmp( buffer, test.data(), test.size() ) );
-
-/** TODO: make sure that we can call validate() on the message and it passes, this is thread safe and
- *   ensures the type is properly registered and can be deserialized... one issue is that this could
- *   construct a RECURSIVE virtual machine state which means the wasm_interface state needs to be a STACK vs
- *   a per-thread global.
- **/
-
-//   wasm.current_apply_context->generated.emplace_back( std::move(gtrx) );
-
-   return 0;
-}
-
-
-
-
-DEFINE_INTRINSIC_FUNCTION2(env,readMessage,readMessage,i32,i32,destptr,i32,destsize) {
-   FC_ASSERT( destsize > 0 );
-
-   wasm_interface& wasm = wasm_interface::get();
-   auto  mem   = wasm.current_memory;
-   char* begin = memoryArrayPtr<char>( mem, destptr, uint32_t(destsize) );
-
-   int minlen = std::min<int>(wasm.current_validate_context->msg.data.size(), destsize);
-
-//   wdump((destsize)(wasm.current_validate_context->msg.data.size()));
-   memcpy( begin, wasm.current_validate_context->msg.data.data(), minlen );
-   return minlen;
-}
-
-DEFINE_INTRINSIC_FUNCTION2(env,assert,assert,none,i32,test,i32,msg) {
-   const char* m = &Runtime::memoryRef<char>( wasm_interface::get().current_memory, msg );
-  std::string message( m );
-  if( !test ) edump((message));
-  FC_ASSERT( test, "assertion failed: ${s}", ("s",message)("ptr",msg) );
-}
-
-DEFINE_INTRINSIC_FUNCTION0(env,messageSize,messageSize,i32) {
-   return wasm_interface::get().current_validate_context->msg.data.size();
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,malloc,malloc,i32,i32,size) {
-   FC_ASSERT( size > 0 );
-   int32_t& end = Runtime::memoryRef<int32_t>( Runtime::getDefaultMemory(wasm_interface::get().current_module), 0);
-   int32_t old_end = end;
-   end += 8*((size+7)/8);
-   FC_ASSERT( end > old_end );
-   return old_end;
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,printi,printi,none,i64,val) {
-  std::cerr << uint64_t(val);
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,printi128,printi128,none,i32,val) {
-  auto& wasm  = wasm_interface::get();
-  auto  mem   = wasm.current_memory;
-  auto& value = memoryRef<unsigned __int128>( mem, val );
-  fc::uint128_t v(value>>64, uint64_t(value) );
-  std::cerr << fc::variant(v).get_string();
-}
-DEFINE_INTRINSIC_FUNCTION1(env,printn,printn,none,i64,val) {
-  std::cerr << Name(val).toString();
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,prints,prints,none,i32,charptr) {
-  auto& wasm  = wasm_interface::get();
-  auto  mem   = wasm.current_memory;
-
-  const char* str = &memoryRef<const char>( mem, charptr );
-
-  std::cerr << std::string( str, strnlen(str, wasm.current_state->mem_end-charptr) );
-}
-
-DEFINE_INTRINSIC_FUNCTION1(env,free,free,none,i32,ptr) {
-}
-
-   wasm_interface& wasm_interface::get() {
-      static wasm_interface*  wasm = nullptr;
-      if( !wasm )
-      {
-         wlog( "Runtime::init" );
-         Runtime::init();
-         wasm = new wasm_interface();
-      }
-      return *wasm;
-   }
-
-
-
-   struct RootResolver : Runtime::Resolver
+namespace eosio { namespace chain {
+   using namespace contracts;
+
+   /**
+    * Integration with the WASM Linker to resolve our intrinsics
+    */
+   struct root_resolver : Runtime::Resolver
    {
-      std::map<std::string,Resolver*> moduleNameToResolverMap;
-
-     bool resolve(const std::string& moduleName,const std::string& exportName,ObjectType type,ObjectInstance*& outObject) override
-     {
+      bool resolve(const string& mod_name,
+                   const string& export_name,
+                   ObjectType type,
+                   ObjectInstance*& out) override
+      {
          // Try to resolve an intrinsic first.
-         if(IntrinsicResolver::singleton.resolve(moduleName,exportName,type,outObject)) { return true; }
-         FC_ASSERT( !"unresolvable", "${module}.${export}", ("module",moduleName)("export",exportName) );
+         if(IntrinsicResolver::singleton.resolve(mod_name,export_name,type, out)) {
+            return true;
+         }
+
+         FC_ASSERT( !"unresolvable", "${module}.${export}", ("module",mod_name)("export",export_name) );
          return false;
-     }
+      }
    };
 
-   int64_t wasm_interface::current_execution_time()
-   {
-      return (fc::time_point::now() - checktimeStart).count();
+   /**
+    *  Implementation class for the wasm cache
+    *  it is responsible for compiling and storing instances of wasm code for use
+    *
+    */
+   struct wasm_cache_impl {
+      wasm_cache_impl()
+      {
+         Runtime::init();
+      }
+
+      /**
+       * this must wait for all work to be done otherwise it may destroy memory
+       * referenced by other threads
+       *
+       * Expectations on wasm_cache dictate that all available code has been
+       * returned before this can be destroyed
+       */
+      ~wasm_cache_impl() {
+         freeUnreferencedObjects({});
+      }
+
+      /**
+       * internal tracking structure which deduplicates memory images
+       * and tracks available vs in-use entries.
+       *
+       * The instances array has two sections, "available" instances
+       * are in the front of the vector and anything at an index of
+       * available_instances or greater is considered "in use"
+       *
+       * instances are stored as pointers so that their positions
+       * in the array can be moved without invaliding references to
+       * the instance handed out to other threads
+       */
+      struct code_info {
+         code_info( size_t mem_end, vector<char>&& mem_image )
+         :mem_end(mem_end),mem_image(std::forward<vector<char>>(mem_image))
+         {}
+
+         // a clean image of the memory used to sanitize things on checkin
+         size_t mem_start           = 0;
+         size_t mem_end             = 1<<16;
+         vector<char> mem_image;
+
+         // all existing instances of this code
+         vector<unique_ptr<wasm_cache::entry>> instances;
+         size_t available_instances = 0;
+      };
+
+      using optional_info_ref = optional<std::reference_wrapper<code_info>>;
+      using optional_entry_ref = optional<std::reference_wrapper<wasm_cache::entry>>;
+
+      /**
+       * Convenience method for running code with the _cache_lock and releaseint that lock
+       * when the code completes
+       *
+       * @param f - lambda to execute
+       * @return - varies depending on the signature of the lambda
+       */
+      template<typename F>
+      auto with_lock(std::mutex &l, F f) {
+         std::lock_guard<std::mutex> lock(l);
+         return f();
+      };
+
+      /**
+       * Fetch the tracking struct given a code_id if it exists
+       *
+       * @param code_id
+       * @return
+       */
+      optional_info_ref fetch_info(const digest_type& code_id) {
+         return with_lock(_cache_lock, [&,this](){
+            auto iter = _cache.find(code_id);
+            if (iter != _cache.end()) {
+               return optional_info_ref(iter->second);
+            }
+
+            return optional_info_ref();
+         });
+      }
+
+      /**
+       * Opportunistically fetch an available instance of the code;
+       * @param code_id - the id of the code to fetch
+       * @return - reference to the entry when one is available
+       */
+      optional_entry_ref try_fetch_entry(const digest_type& code_id) {
+         return with_lock(_cache_lock, [&,this](){
+            auto iter = _cache.find(code_id);
+            if (iter != _cache.end() && iter->second.available_instances > 0) {
+               auto &ptr = iter->second.instances.at(--(iter->second.available_instances));
+               return optional_entry_ref(*ptr);
+            }
+
+            return optional_entry_ref();
+         });
+      }
+
+      /**
+       * Fetch a copy of the code, this is guaranteed to return an entry IF the code is compilable.
+       * In order to do that in safe way this code may cause the calling thread to sleep while a new
+       * version of the code is compiled and inserted into the cache
+       *
+       * @param code_id - the id of the code to fetch
+       * @param wasm_binary - the binary for the wasm
+       * @param wasm_binary_size - the size of the binary
+       * @return reference to a usable cache entry
+       */
+      wasm_cache::entry& fetch_entry(const digest_type& code_id, const char* wasm_binary, size_t wasm_binary_size) {
+         std::condition_variable condition;
+         optional_entry_ref result;
+         std::exception_ptr error;
+
+         // compilation is not thread safe, so we dispatch it to a io_service running on a single thread to
+         // queue up and synchronize compilations
+         with_lock(_compile_lock, [&,this](){
+            // check to see if someone returned what we need before making a new one
+            auto pending_result = try_fetch_entry(code_id);
+            std::exception_ptr pending_error;
+
+            if (!pending_result) {
+               // time to compile a brand new (maybe first) copy of this code
+               Module* module = new Module();
+               ModuleInstance* instance = nullptr;
+               size_t mem_end = 0;
+               vector<char> mem_image;
+
+               try {
+                  Serialization::MemoryInputStream stream((const U8 *) wasm_binary, wasm_binary_size);
+                  WASM::serializeWithInjection(stream, *module);
+                  validate_eosio_wasm_constraints(*module);
+
+                  root_resolver resolver;
+                  LinkResult link_result = linkModule(*module, resolver);
+                  instance = instantiateModule(*module, std::move(link_result.resolvedImports));
+                  FC_ASSERT(instance != nullptr);
+
+                  MemoryInstance* current_memory = Runtime::getDefaultMemory(instance);
+
+                  if(current_memory) {
+                     char *mem_ptr = &memoryRef<char>(current_memory, 0);
+                     const auto allocated_memory = Runtime::getDefaultMemorySize(instance);
+                     for (uint64_t i = 0; i < allocated_memory; ++i) {
+                        if (mem_ptr[i])
+                           mem_end = i + 1;
+                     }
+                     mem_image.resize(mem_end);
+                     memcpy(mem_image.data(), mem_ptr, mem_end);
+                  }
+                  
+               } catch (...) {
+                  pending_error = std::current_exception();
+               }
+
+               if (pending_error == nullptr) {
+                  // grab the lock and put this in the cache as unavailble
+                  with_lock(_cache_lock, [&,this]() {
+                     // find or create a new entry
+                     auto iter = _cache.emplace(code_id, code_info(mem_end, std::move(mem_image))).first;
+
+                     iter->second.instances.emplace_back(std::make_unique<wasm_cache::entry>(instance, module));
+                     pending_result = optional_entry_ref(*iter->second.instances.back().get());
+                  });
+               }
+            }
+
+           if (pending_error != nullptr) {
+              error = pending_error;
+           } else {
+              result = pending_result;
+           }
+
+         });
+
+
+         try {
+            if (error != nullptr) {
+               std::rethrow_exception(error);
+            } else {
+               return (*result).get();
+            }
+         } FC_RETHROW_EXCEPTIONS(error, "error compiling WASM for code with hash: ${code_id}", ("code_id", code_id));
+      }
+
+      /**
+       * return an entry to the cache.  The entry is presumed to come back in a "dirty" state and must be
+       * sanitized before returning to the "available" state.  This sanitization is done asynchronously so
+       * as not to delay the current executing thread.
+       *
+       * @param code_id - the code Id associated with the instance
+       * @param entry - the entry to return
+       */
+      void return_entry(const digest_type& code_id, wasm_cache::entry& entry) {
+        // sanitize by reseting the memory that may now be dirty
+        auto& info = (*fetch_info(code_id)).get();
+        if(getDefaultMemory(entry.instance)) {
+           char* memstart = &memoryRef<char>( getDefaultMemory(entry.instance), 0 );
+           memset( memstart + info.mem_end, 0, ((1<<16) - info.mem_end) );
+           memcpy( memstart, info.mem_image.data(), info.mem_end);
+        }
+        resetGlobalInstances(entry.instance);
+
+        // under a lock, put this entry back in the available instances side of the instances vector
+        with_lock(_cache_lock, [&,this](){
+           // walk the vector and find this entry
+           auto iter = info.instances.begin();
+           while (iter->get() != &entry) {
+              ++iter;
+           }
+
+           FC_ASSERT(iter != info.instances.end(), "Checking in a WASM enty that was not created properly!");
+
+           auto first_unavailable = (info.instances.begin() + info.available_instances);
+           if (iter != first_unavailable) {
+              std::swap(iter, first_unavailable);
+           }
+           info.available_instances++;
+        });
+      }
+
+      // mapping of digest to an entry for the code
+      map<digest_type, code_info> _cache;
+      std::mutex _cache_lock;
+
+      // compilation lock
+      std::mutex _compile_lock;
+   };
+
+   wasm_cache::wasm_cache()
+      :_my( new wasm_cache_impl() ) {
+   }
+
+   wasm_cache::~wasm_cache() = default;
+
+   wasm_cache::entry &wasm_cache::checkout( const digest_type& code_id, const char* wasm_binary, size_t wasm_binary_size ) {
+      // see if there is an available entry in the cache
+      auto result = _my->try_fetch_entry(code_id);
+      if (result) {
+         return (*result).get();
+      }
+      return _my->fetch_entry(code_id, wasm_binary, wasm_binary_size);
    }
 
 
-   char* wasm_interface::vm_allocate( int bytes ) {
-      FunctionInstance* alloc_function = asFunctionNullable(getInstanceExport(current_module,"alloc"));
-      const FunctionType* functionType = getFunctionType(alloc_function);
-      FC_ASSERT( functionType->parameters.size() == 1 );
-      std::vector<Value> invokeArgs(1);
-      invokeArgs[0] = U32(bytes);
-
-      checktimeStart = fc::time_point::now();
-
-      auto result = Runtime::invokeFunction(alloc_function,invokeArgs);
-
-      return &memoryRef<char>( current_memory, result.i32 );
+   void wasm_cache::checkin(const digest_type& code_id, entry& code ) {
+      MemoryInstance* default_mem = Runtime::getDefaultMemory(code.instance);
+      if(default_mem)
+         Runtime::shrinkMemory(default_mem, Runtime::getMemoryNumPages(default_mem) - 1);
+      _my->return_entry(code_id, code);
    }
 
-   U32 wasm_interface::vm_pointer_to_offset( char* ptr ) {
-      return U32(ptr - &memoryRef<char>(current_memory,0));
-   }
+   /**
+    * RAII wrapper to make sure that the context is cleaned up on exception
+    */
+   struct scoped_context {
+      template<typename ...Args>
+      scoped_context(optional<wasm_context> &context, Args&... args)
+      :context(context)
+      {
+         context = wasm_context{ args... };
+      }
 
-   void  wasm_interface::vm_call( const char* name ) {
+      ~scoped_context() {
+         context.reset();
+      }
+
+      optional<wasm_context>& context;
+   };
+
+   void wasm_interface_impl::call(const string& entry_point, const vector<Value>& args, wasm_cache::entry& code, apply_context& context)
    try {
-      try {
-         /*
-         name += "_" + std::string( current_validate_context->msg.code ) + "_";
-         name += std::string( current_validate_context->msg.type );
-         */
-         /// TODO: cache this somehow
-         FunctionInstance* call = asFunctionNullable(getInstanceExport(current_module,name) );
-         if( !call ) {
-            //wlog( "unable to find call ${name}", ("name",name));
-            return;
-         }
-         //FC_ASSERT( apply, "no entry point found for ${call}", ("call", std::string(name))  );
-
-         FC_ASSERT( getFunctionType(call)->parameters.size() == 2 );
-
-  //       idump((current_validate_context->msg.code)(current_validate_context->msg.type)(current_validate_context->code));
-         std::vector<Value> args = { Value(uint64_t(current_validate_context->msg.code)),
-                                     Value(uint64_t(current_validate_context->msg.type)) };
-
-         auto& state = *current_state;
-         char* memstart = &memoryRef<char>( current_memory, 0 );
-         memset( memstart + state.mem_end, 0, ((1<<16) - state.mem_end) );
-         memcpy( memstart, state.init_memory.data(), state.mem_end);
-
-         checktimeStart = fc::time_point::now();
-
-         Runtime::invokeFunction(call,args);
-      } catch( const Runtime::Exception& e ) {
-          edump((std::string(describeExceptionCause(e.cause))));
-          edump((e.callStack));
-          throw;
+      FunctionInstance* call = asFunctionNullable(getInstanceExport(code.instance,entry_point) );
+      if( !call ) {
+         return;
       }
-   } FC_CAPTURE_AND_RETHROW( (name)(current_validate_context->msg.type) ) }
 
-   void  wasm_interface::vm_apply()        { vm_call("apply" );          }
+      FC_ASSERT( getFunctionType(call)->parameters.size() == args.size() );
 
-   void  wasm_interface::vm_onInit()
-   { try {
-      try {
-          wlog( "on_init" );
-            FunctionInstance* apply = asFunctionNullable(getInstanceExport(current_module,"init"));
-            if( !apply ) {
-               elog( "no onInit method found" );
-               return; /// if not found then it is a no-op
-         }
+      auto context_guard = scoped_context(current_context, code, context);
+      runInstanceStartFunc(code.instance);
+      Runtime::invokeFunction(call,args);
+   } catch( const Runtime::Exception& e ) {
+      FC_THROW_EXCEPTION(wasm_execution_error,
+                         "cause: ${cause}\n${callstack}",
+                         ("cause", string(describeExceptionCause(e.cause)))
+                         ("callstack", e.callStack));
+   } FC_CAPTURE_AND_RETHROW()
 
-         checktimeStart = fc::time_point::now();
-
-            const FunctionType* functionType = getFunctionType(apply);
-            FC_ASSERT( functionType->parameters.size() == 0 );
-
-            std::vector<Value> args(0);
-
-            Runtime::invokeFunction(apply,args);
-      } catch( const Runtime::Exception& e ) {
-          edump((std::string(describeExceptionCause(e.cause))));
-          edump((e.callStack));
-          throw;
-      }
-   } FC_CAPTURE_AND_RETHROW() }
-
-   void wasm_interface::validate( apply_context& c ) {
-      /*
-      current_validate_context       = &c;
-      current_precondition_context   = nullptr;
-      current_apply_context          = nullptr;
-
-      load( c.code, c.db );
-      vm_validate();
-      */
-   }
-   void wasm_interface::precondition( apply_context& c ) {
-   try {
-
-      /*
-      current_validate_context       = &c;
-      current_precondition_context   = &c;
-
-      load( c.code, c.db );
-      vm_precondition();
-      */
-
-   } FC_CAPTURE_AND_RETHROW() }
-
-
-   void wasm_interface::apply( apply_context& c ) {
-    try {
-      current_validate_context       = &c;
-      current_precondition_context   = &c;
-      current_apply_context          = &c;
-
-      load( c.code, c.db );
-      vm_apply();
-
-   } FC_CAPTURE_AND_RETHROW() }
-
-   void wasm_interface::init( apply_context& c ) {
-    try {
-      current_validate_context       = &c;
-      current_precondition_context   = &c;
-      current_apply_context          = &c;
-
-      load( c.code, c.db );
-      vm_onInit();
-
-   } FC_CAPTURE_AND_RETHROW() }
-
-
-
-   void wasm_interface::load( const AccountName& name, const chainbase::database& db ) {
-      const auto& recipient = db.get<account_object,by_name>( name );
-  //    idump(("recipient")(Name(name))(recipient.code_version));
-
-      auto& state = instances[name];
-      if( state.code_version != recipient.code_version ) {
-         if( state.instance ) {
-            /// TODO: free existing instance and module
-#warning TODO: free existing module if the code has been updated, currently leak memory
-            state.instance     = nullptr;
-            state.module       = nullptr;
-            state.code_version = fc::sha256();
-         }
-         state.module = new IR::Module();
-
-        try
-        {
-          wlog( "LOADING CODE" );
-          auto start = fc::time_point::now();
-          Serialization::MemoryInputStream stream((const U8*)recipient.code.data(),recipient.code.size());
-          WASM::serializeWithInjection(stream,*state.module);
-
-          RootResolver rootResolver;
-          LinkResult linkResult = linkModule(*state.module,rootResolver);
-          state.instance = instantiateModule( *state.module, std::move(linkResult.resolvedImports) );
-          FC_ASSERT( state.instance );
-          auto end = fc::time_point::now();
-          idump(( (end-start).count()/1000000.0) );
-
-          current_memory = Runtime::getDefaultMemory(state.instance);
-
-          char* memstart = &memoryRef<char>( current_memory, 0 );
-         // state.init_memory.resize(1<<16); /// TODO: actually get memory size
-          for( uint32_t i = 0; i < 10000; ++i )
-              if( memstart[i] ) {
-                   state.mem_end = i+1;
-                   //std::cerr << (char)memstart[i];
-              }
-          ilog( "INIT MEMORY: ${size}", ("size", state.mem_end) );
-
-          state.init_memory.resize(state.mem_end);
-          memcpy( state.init_memory.data(), memstart, state.mem_end ); //state.init_memory.size() );
-          std::cerr <<"\n";
-          state.code_version = recipient.code_version;
-          idump((state.code_version));
-        }
-        catch(Serialization::FatalSerializationException exception)
-        {
-          std::cerr << "Error deserializing WebAssembly binary file:" << std::endl;
-          std::cerr << exception.message << std::endl;
-          throw;
-        }
-        catch(IR::ValidationException exception)
-        {
-          std::cerr << "Error validating WebAssembly binary file:" << std::endl;
-          std::cerr << exception.message << std::endl;
-          throw;
-        }
-        catch(std::bad_alloc)
-        {
-          std::cerr << "Memory allocation failed: input is likely malformed" << std::endl;
-          throw;
-        }
-      }
-      current_module = state.instance;
-      current_memory = getDefaultMemory( current_module );
-      current_state  = &state;
+   wasm_interface::wasm_interface()
+      :my( new wasm_interface_impl() ) {
    }
 
-} }
+   wasm_interface& wasm_interface::get() {
+      thread_local wasm_interface* single = nullptr;
+      if( !single ) {
+         single = new wasm_interface();
+      }
+      return *single;
+   }
+
+   void wasm_interface::apply( wasm_cache::entry& code, apply_context& context ) {
+      vector<Value> args = {Value(uint64_t(context.act.account)),
+                            Value(uint64_t(context.act.name))};
+      my->call("apply", args, code, context);
+   }
+
+   void wasm_interface::error( wasm_cache::entry& code, apply_context& context ) {
+      vector<Value> args = { /* */ };
+      my->call("error", args, code, context);
+   }
+
+#if defined(assert)
+   #undef assert
+#endif
+
+class context_aware_api {
+   public:
+      context_aware_api(wasm_interface& wasm)
+      :context(intrinsics_accessor::get_context(wasm).context), code(intrinsics_accessor::get_context(wasm).code),
+       sbrk_bytes(intrinsics_accessor::get_context(wasm).sbrk_bytes)
+      {}
+
+   protected:
+      uint32_t&          sbrk_bytes;
+      wasm_cache::entry& code;
+      apply_context&     context;
+};
+
+class privileged_api : public context_aware_api {
+   public:
+      privileged_api( wasm_interface& wasm )
+      :context_aware_api(wasm)
+      {
+         FC_ASSERT( context.privileged, "${code} does not have permission to call this API", ("code",context.receiver) );
+      }
+
+      /**
+       *  This should schedule the feature to be activated once the
+       *  block that includes this call is irreversible. It should
+       *  fail if the feature is already pending.
+       *
+       *  Feature name should be base32 encoded name. 
+       */
+      void activate_feature( int64_t feature_name ) {
+         FC_ASSERT( !"Unsupported Harfork Detected" );
+      }
+
+      /**
+       * This should return true if a feature is active and irreversible, false if not.
+       *
+       * Irreversiblity by fork-database is not consensus safe, therefore, this defines
+       * irreversiblity only by block headers not by BFT short-cut.
+       */
+      int is_feature_active( int64_t feature_name ) {
+         return false;
+      }
+
+      void set_resource_limits( account_name account, 
+                                int64_t ram_bytes, int64_t net_weight, int64_t cpu_weight,
+                                int64_t cpu_usec_per_period ) {
+         auto& buo = context.db.get<bandwidth_usage_object,by_owner>( account );
+         FC_ASSERT( buo.db_usage <= ram_bytes, "attempt to free to much space" );
+
+         auto& gdp = context.controller.get_dynamic_global_properties();
+         context.mutable_db.modify( gdp, [&]( auto& p ) {
+           p.total_net_weight -= buo.net_weight;
+           p.total_net_weight += net_weight;
+           p.total_cpu_weight -= buo.cpu_weight;
+           p.total_cpu_weight += cpu_weight;
+           p.total_db_reserved -= buo.db_reserved_capacity;
+           p.total_db_reserved += ram_bytes;
+         });
+
+         context.mutable_db.modify( buo, [&]( auto& o ){
+            o.net_weight = net_weight;
+            o.cpu_weight = cpu_weight;
+            o.db_reserved_capacity = ram_bytes;
+         });
+      }
+
+
+      void get_resource_limits( account_name account, 
+                                uint64_t& ram_bytes, uint64_t& net_weight, uint64_t cpu_weight ) {
+      }
+                                               
+      void set_active_producers( array_ptr<char> packed_producer_schedule, size_t datalen) {
+         datastream<const char*> ds( packed_producer_schedule, datalen );
+         producer_schedule_type psch;
+         fc::raw::unpack(ds, psch);
+
+         context.mutable_db.modify( context.controller.get_global_properties(), 
+            [&]( auto& gprops ) {
+                 gprops.new_active_producers = psch;
+         });
+      }
+
+      bool is_privileged( account_name n )const {
+         return context.db.get<account_object, by_name>( n ).privileged;
+      }
+      bool is_frozen( account_name n )const {
+         return context.db.get<account_object, by_name>( n ).frozen;
+      }
+      void set_privileged( account_name n, bool is_priv ) {
+         const auto& a = context.db.get<account_object, by_name>( n );
+         context.mutable_db.modify( a, [&]( auto& ma ){
+            ma.privileged = is_priv;
+         });
+      }
+
+      void freeze_account( account_name n , bool should_freeze ) {
+         const auto& a = context.db.get<account_object, by_name>( n );
+         context.mutable_db.modify( a, [&]( auto& ma ){
+            ma.frozen = should_freeze;
+         });
+      }
+
+      /// TODO: add inline/deferred with support for arbitrary permissions rather than code/current auth
+};
+
+class checktime_api : public context_aware_api {
+public:
+   using context_aware_api::context_aware_api;
+
+   void checktime(uint32_t instruction_count) {
+      context.checktime(instruction_count);
+   }
+};
+
+class producer_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      int get_active_producers(array_ptr<chain::account_name> producers, size_t datalen) {
+         auto active_producers = context.get_active_producers();
+         size_t len = active_producers.size() * sizeof(chain::account_name);
+         size_t cpy_len = std::min(datalen, len);
+         memcpy(producers, active_producers.data(), cpy_len);
+         return len;
+      }
+};
+
+class crypto_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      /**
+       * This method can be optimized out during replay as it has
+       * no possible side effects other than "passing". 
+       */
+      void assert_recover_key( fc::sha256& digest, 
+                        array_ptr<char> sig, size_t siglen,
+                        array_ptr<char> pub, size_t publen ) {
+         fc::crypto::signature s;
+         fc::crypto::public_key p;
+         datastream<const char*> ds( sig, siglen );
+         datastream<const char*> pubds( pub, publen );
+
+         fc::raw::unpack(ds, s);
+         fc::raw::unpack(ds, p);
+
+         auto check = fc::crypto::public_key( s, digest, false );
+         FC_ASSERT( check == p, "Error expected key different than recovered key" );
+      }
+
+      int recover_key( fc::sha256& digest, 
+                        array_ptr<char> sig, size_t siglen,
+                        array_ptr<char> pub, size_t publen ) {
+         fc::crypto::signature s;
+         datastream<const char*> ds( sig, siglen );
+         datastream<char*> pubds( pub, publen );
+
+         fc::raw::unpack(ds, s);
+         fc::raw::pack( pubds, fc::crypto::public_key( s, digest, false ) );
+         return pubds.tellp();
+      }
+
+      void assert_sha256(array_ptr<char> data, size_t datalen, const fc::sha256& hash_val) {
+         auto result = fc::sha256::hash( data, datalen );
+         FC_ASSERT( result == hash_val, "hash miss match" );
+      }
+
+      void sha1(array_ptr<char> data, size_t datalen, fc::sha1& hash_val) {
+         hash_val = fc::sha1::hash( data, datalen );
+      }
+
+      void sha256(array_ptr<char> data, size_t datalen, fc::sha256& hash_val) {
+         hash_val = fc::sha256::hash( data, datalen );
+      }
+
+      void sha512(array_ptr<char> data, size_t datalen, fc::sha512& hash_val) {
+         hash_val = fc::sha512::hash( data, datalen );
+      }
+
+      void ripemd160(array_ptr<char> data, size_t datalen, fc::ripemd160& hash_val) {
+         hash_val = fc::ripemd160::hash( data, datalen );
+      }
+};
+
+class string_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      void assert_is_utf8(array_ptr<const char> str, size_t datalen, null_terminated_ptr msg) {
+         const bool test = fc::is_utf8(std::string( str, datalen ));
+
+         FC_ASSERT( test, "assertion failed: ${s}", ("s",msg.value) );
+      }
+};
+
+class system_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      void abort() {
+         edump(("abort() called"));
+         FC_ASSERT( false, "abort() called");
+      }
+
+      void eos_assert(bool condition, null_terminated_ptr str) {
+         std::string message( str );
+         if( !condition ) edump((message));
+         FC_ASSERT( condition, "assertion failed: ${s}", ("s",message));
+      }
+
+      fc::time_point_sec now() {
+         return context.controller.head_block_time();
+      }
+};
+
+class action_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      int read_action(array_ptr<char> memory, size_t size) {
+         FC_ASSERT(size > 0);
+         int minlen = std::min<size_t>(context.act.data.size(), size);
+         memcpy((void *)memory, context.act.data.data(), minlen);
+         return minlen;
+      }
+
+      int action_size() {
+         return context.act.data.size();
+      }
+
+      const name& current_receiver() {
+         return context.receiver;
+      }
+
+      fc::time_point_sec publication_time() {
+         return context.trx_meta.published;
+      }
+
+      name current_sender() {
+         if (context.trx_meta.sender) {
+            return *context.trx_meta.sender;
+         } else {
+            return name();
+         }
+      }
+};
+
+class console_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      void prints(null_terminated_ptr str) {
+         context.console_append<const char*>(str);
+      }
+
+      void prints_l(array_ptr<const char> str, size_t str_len ) {
+         context.console_append(string(str, str_len));
+      }
+
+      void printi(uint64_t val) {
+         context.console_append(val);
+      }
+
+      void printi128(const unsigned __int128& val) {
+         fc::uint128_t v(val>>64, uint64_t(val) );
+         context.console_append(fc::variant(v).get_string());
+      }
+
+      void printd( wasm_double val ) {
+         context.console_append(val.str());
+      }
+
+      void printn(const name& value) {
+         context.console_append(value.to_string());
+      }
+
+      void printhex(array_ptr<const char> data, size_t data_len ) {
+         context.console_append(fc::to_hex(data, data_len));
+      }
+};
+
+class database_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      int db_store_i64( uint64_t scope, uint64_t table, uint64_t payer, uint64_t id, array_ptr<const char> buffer, size_t buffer_size ) {
+         return context.db_store_i64( scope, table, payer, id, buffer, buffer_size );
+      }
+      void db_update_i64( int itr, uint64_t payer, array_ptr<const char> buffer, size_t buffer_size ) {
+         context.db_update_i64( itr, payer, buffer, buffer_size );
+      }
+      void db_remove_i64( int itr ) {
+         context.db_remove_i64( itr );
+      }
+      int db_get_i64( int itr, uint64_t& id, array_ptr<char> buffer, size_t buffer_size ) {
+         return context.db_get_i64( itr, id, buffer, buffer_size );
+      }
+      int db_next_i64( int itr ) { return context.db_next_i64(itr); }
+      int db_find_i64( uint64_t code, uint64_t scope, uint64_t table, uint64_t id ) { 
+         return context.db_find_i64( code, scope, table, id ); 
+      }
+      int db_lowerbound_i64( uint64_t code, uint64_t scope, uint64_t table, uint64_t id ) { 
+         return context.db_lowerbound_i64( code, scope, table, id ); 
+      }
+      int db_upperbound_i64( uint64_t code, uint64_t scope, uint64_t table, uint64_t id ) { 
+         return context.db_lowerbound_i64( code, scope, table, id ); 
+      }
+
+      int db_idx64_store( uint64_t scope, uint64_t table, uint64_t payer, uint64_t id, const uint64_t& secondary ) {
+         return context.idx64.store( scope, table, payer, id, secondary );
+      }
+      void db_idx64_update( int iterator, uint64_t payer, const uint64_t& secondary ) {
+         return context.idx64.update( iterator, payer, secondary );
+      }
+      void db_idx64_remove( int iterator ) {
+         return context.idx64.remove( iterator );
+      }
+
+
+      int db_idx128_store( uint64_t scope, uint64_t table, uint64_t payer, uint64_t id, const uint128_t& secondary ) {
+         return context.idx128.store( scope, table, payer, id, secondary );
+      }
+      void db_idx128_update( int iterator, uint64_t payer, const uint128_t& secondary ) {
+         return context.idx128.update( iterator, payer, secondary );
+      }
+      void db_idx128_remove( int iterator ) {
+         return context.idx128.remove( iterator );
+      }
+};
+
+
+
+template<typename ObjectType>
+class db_api : public context_aware_api {
+   using KeyType = typename ObjectType::key_type;
+   static constexpr int KeyCount = ObjectType::number_of_keys;
+   using KeyArrayType = KeyType[KeyCount];
+   using ContextMethodType = int(apply_context::*)(const table_id_object&, const account_name&, const KeyType*, const char*, size_t);
+
+   private:
+      int call(ContextMethodType method, const scope_name& scope, const name& table, account_name bta, array_ptr<const char> data, size_t data_len) {
+         const auto& t_id = context.find_or_create_table(context.receiver, scope, table);
+         FC_ASSERT(data_len >= KeyCount * sizeof(KeyType), "Data is not long enough to contain keys");
+         const KeyType* keys = reinterpret_cast<const KeyType *>((const char *)data);
+
+         const char* record_data =  ((const char*)data) + sizeof(KeyArrayType);
+         size_t record_len = data_len - sizeof(KeyArrayType);
+         return (context.*(method))(t_id, bta, keys, record_data, record_len) + sizeof(KeyArrayType);
+      }
+
+   public:
+      using context_aware_api::context_aware_api;
+
+      int store(const scope_name& scope, const name& table, const account_name& bta, array_ptr<const char> data, size_t data_len) {
+         auto res = call(&apply_context::store_record<ObjectType>, scope, table, bta, data, data_len);
+         //ilog("STORE [${scope},${code},${table}] => ${res} :: ${HEX}", ("scope",scope)("code",context.receiver)("table",table)("res",res)("HEX", fc::to_hex(data, data_len)));
+         return res;
+      }
+
+      int update(const scope_name& scope, const name& table, const account_name& bta, array_ptr<const char> data, size_t data_len) {
+         return call(&apply_context::update_record<ObjectType>, scope, table, bta, data, data_len);
+      }
+
+      int remove(const scope_name& scope, const name& table, const KeyArrayType &keys) {
+         const auto& t_id = context.find_or_create_table(context.receiver, scope, table);
+         return context.remove_record<ObjectType>(t_id, keys);
+      }
+};
+
+template<typename IndexType, typename Scope>
+class db_index_api : public context_aware_api {
+   using KeyType = typename IndexType::value_type::key_type;
+   static constexpr int KeyCount = IndexType::value_type::number_of_keys;
+   using KeyArrayType = KeyType[KeyCount];
+   using ContextMethodType = int(apply_context::*)(const table_id_object&, KeyType*, char*, size_t);
+
+
+   int call(ContextMethodType method, const account_name& code, const scope_name& scope, const name& table, array_ptr<char> data, size_t data_len) {
+      auto maybe_t_id = context.find_table(code, scope, table);
+      if (maybe_t_id == nullptr) {
+         return -1;
+      }
+
+      const auto& t_id = *maybe_t_id;
+      FC_ASSERT(data_len >= KeyCount * sizeof(KeyType), "Data is not long enough to contain keys");
+      KeyType* keys = reinterpret_cast<KeyType *>((char *)data);
+
+      char* record_data =  ((char*)data) + sizeof(KeyArrayType);
+      size_t record_len = data_len - sizeof(KeyArrayType);
+
+      auto res = (context.*(method))(t_id, keys, record_data, record_len);
+      if (res != -1) {
+         res += sizeof(KeyArrayType);
+      }
+      return res;
+   }
+
+   public:
+      using context_aware_api::context_aware_api;
+
+      int load(const account_name& code, const scope_name& scope, const name& table, array_ptr<char> data, size_t data_len) {
+         auto res = call(&apply_context::load_record<IndexType, Scope>, code, scope, table, data, data_len);
+         //ilog("LOAD [${scope},${code},${table}] => ${res} :: ${HEX}", ("scope",scope)("code",code)("table",table)("res",res)("HEX", fc::to_hex(data, data_len)));
+         return res;
+      }
+
+      int front(const account_name& code, const scope_name& scope, const name& table, array_ptr<char> data, size_t data_len) {
+         return call(&apply_context::front_record<IndexType, Scope>, code, scope, table, data, data_len);
+      }
+
+      int back(const account_name& code, const scope_name& scope, const name& table, array_ptr<char> data, size_t data_len) {
+         return call(&apply_context::back_record<IndexType, Scope>, code, scope, table, data, data_len);
+      }
+
+      int next(const account_name& code, const scope_name& scope, const name& table, array_ptr<char> data, size_t data_len) {
+         return call(&apply_context::next_record<IndexType, Scope>, code, scope, table, data, data_len);
+      }
+
+      int previous(const account_name& code, const scope_name& scope, const name& table, array_ptr<char> data, size_t data_len) {
+         return call(&apply_context::previous_record<IndexType, Scope>, code, scope, table, data, data_len);
+      }
+
+      int lower_bound(const account_name& code, const scope_name& scope, const name& table, array_ptr<char> data, size_t data_len) {
+         return call(&apply_context::lower_bound_record<IndexType, Scope>, code, scope, table, data, data_len);
+      }
+
+      int upper_bound(const account_name& code, const scope_name& scope, const name& table, array_ptr<char> data, size_t data_len) {
+         return call(&apply_context::upper_bound_record<IndexType, Scope>, code, scope, table, data, data_len);
+      }
+
+};
+
+class memory_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+     
+      char* memcpy( array_ptr<char> dest, array_ptr<const char> src, size_t length) {
+         return (char *)::memcpy(dest, src, length);
+      }
+
+      char* memmove( array_ptr<char> dest, array_ptr<const char> src, size_t length) {
+         return (char *)::memmove(dest, src, length);
+      }
+
+      int memcmp( array_ptr<const char> dest, array_ptr<const char> src, size_t length) {
+         return ::memcmp(dest, src, length);
+      }
+
+      char* memset( array_ptr<char> dest, int value, size_t length ) {
+         return (char *)::memset( dest, value, length );
+      }
+
+      uint32_t sbrk(int num_bytes) {
+         // TODO: omitted checktime function from previous version of sbrk, may need to be put back in at some point
+         constexpr uint32_t NBPPL2  = IR::numBytesPerPageLog2;
+         constexpr uint32_t MAX_MEM = 1024 * 1024;
+
+         MemoryInstance*  default_mem    = Runtime::getDefaultMemory(code.instance);
+         if(!default_mem)
+            throw eosio::chain::page_memory_error();
+
+         const uint32_t         num_pages      = Runtime::getMemoryNumPages(default_mem);
+         const uint32_t         min_bytes      = (num_pages << NBPPL2) > UINT32_MAX ? UINT32_MAX : num_pages << NBPPL2;
+         const uint32_t         prev_num_bytes = sbrk_bytes; //_num_bytes;
+         
+         // round the absolute value of num_bytes to an alignment boundary
+         num_bytes = (num_bytes + 7) & ~7;
+
+         if ((num_bytes > 0) && (prev_num_bytes > (MAX_MEM - num_bytes)))  // test if allocating too much memory (overflowed)
+            throw eosio::chain::page_memory_error();
+         else if ((num_bytes < 0) && (prev_num_bytes < (min_bytes - num_bytes))) // test for underflow
+            throw eosio::chain::page_memory_error(); 
+
+         // update the number of bytes allocated, and compute the number of pages needed
+         sbrk_bytes += num_bytes;
+         const uint32_t num_desired_pages = (sbrk_bytes + IR::numBytesPerPage - 1) >> NBPPL2;
+
+         // grow or shrink the memory to the desired number of pages
+         if (num_desired_pages > num_pages)
+            Runtime::growMemory(default_mem, num_desired_pages - num_pages);
+         else if (num_desired_pages < num_pages)
+            Runtime::shrinkMemory(default_mem, num_pages - num_desired_pages);
+
+         return prev_num_bytes;
+      }
+};
+
+class transaction_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+      int read_transaction( array_ptr<char> data, size_t data_len ) {
+         bytes trx = context.get_packed_transaction();
+         if (data_len >= trx.size()) {
+            memcpy(data, trx.data(), trx.size());
+         }
+         return trx.size();
+      }
+
+      int transaction_size() {
+         return context.get_packed_transaction().size();
+      }
+
+      int expiration() {
+        return context.trx_meta.trx().expiration.sec_since_epoch();
+      }
+
+      int tapos_block_num() {
+        return context.trx_meta.trx().ref_block_num;
+      }
+      int tapos_block_prefix() {
+        return context.trx_meta.trx().ref_block_prefix;
+      }
+
+      void send_inline( array_ptr<char> data, size_t data_len ) {
+         // TODO: use global properties object for dynamic configuration of this default_max_gen_trx_size
+         FC_ASSERT( data_len < config::default_max_inline_action_size, "inline action too big" );
+
+         action act;
+         fc::raw::unpack<action>(data, data_len, act);
+         context.execute_inline(std::move(act));
+      }
+
+
+      void send_deferred( uint32_t sender_id, const fc::time_point_sec& execute_after, array_ptr<char> data, size_t data_len ) {
+         try {
+            // TODO: use global properties object for dynamic configuration of this default_max_gen_trx_size
+            FC_ASSERT(data_len < config::default_max_gen_trx_size, "generated transaction too big");
+
+            deferred_transaction dtrx;
+            fc::raw::unpack<transaction>(data, data_len, dtrx);
+            dtrx.sender = context.receiver;
+            dtrx.sender_id = sender_id;
+            dtrx.execute_after = execute_after;
+            context.execute_deferred(std::move(dtrx));
+         } FC_CAPTURE_AND_RETHROW((fc::to_hex(data, data_len)));
+      }
+
+};
+
+
+REGISTER_INTRINSICS(privileged_api,
+   (activate_feature,          void(int64_t))
+   (is_feature_active,         int(int64_t))
+   (set_resource_limits,       void(int64_t,int64_t,int64_t,int64_t,int64_t))
+   (set_active_producers,      void(int,int))
+   (is_privileged,             int(int64_t))
+   (set_privileged,            void(int64_t, int))
+   (freeze_account,            void(int64_t, int))
+   (is_frozen,                 int(int64_t))
+);
+
+REGISTER_INTRINSICS(checktime_api,
+   (checktime,      void(int))
+);
+
+REGISTER_INTRINSICS(producer_api,
+   (get_active_producers,      int(int, int))
+);
+
+REGISTER_INTRINSICS( database_api,
+   (db_store_i64,        int(int64_t,int64_t,int64_t,int64_t,int,int))
+   (db_update_i64,       void(int,int64_t,int,int))
+   (db_remove_i64,       void(int))
+   (db_get_i64,          int(int, int, int, int))
+   (db_next_i64,         int(int))
+   (db_find_i64,         int(int64_t,int64_t,int64_t,int64_t))
+   (db_lowerbound_i64,   int(int64_t,int64_t,int64_t,int64_t))
+
+   (db_idx64_store,      int(int64_t,int64_t,int64_t,int64_t,int))
+   (db_idx64_remove,     void(int))
+   (db_idx64_update,     void(int,int64_t,int))
+
+
+   (db_idx128_store,      int(int64_t,int64_t,int64_t,int64_t,int))
+   (db_idx128_remove,     void(int))
+   (db_idx128_update,     void(int,int64_t,int))
+)
+
+REGISTER_INTRINSICS(crypto_api,
+   (assert_recover_key,  void(int, int, int, int, int))
+   (recover_key,    int(int, int, int, int, int))
+   (assert_sha256,  void(int, int, int))
+   (sha1,           void(int, int, int))
+   (sha256,         void(int, int, int))
+   (sha512,         void(int, int, int))
+   (ripemd160,      void(int, int, int))
+);
+
+REGISTER_INTRINSICS(string_api,
+   (assert_is_utf8,  void(int, int, int))
+);
+
+REGISTER_INTRINSICS(system_api,
+   (abort,      void())
+   (eos_assert,      void(int, int))
+   (now,          int())
+);
+
+REGISTER_INTRINSICS(action_api,
+   (read_action,            int(int, int)  )
+   (action_size,            int()          )
+   (current_receiver,   int64_t()          )
+   (publication_time,   int32_t()          )
+   (current_sender,     int64_t()          )
+);
+
+REGISTER_INTRINSICS(apply_context,
+   (require_write_lock,    void(int64_t)   )
+   (require_read_lock,     void(int64_t, int64_t)   )
+   (require_recipient,     void(int64_t)   )
+   (require_authorization, void(int64_t), "require_auth", void(apply_context::*)(const account_name&)const)
+);
+
+REGISTER_INTRINSICS(console_api,
+   (prints,                void(int)       )
+   (prints_l,              void(int, int)  )
+   (printi,                void(int64_t)   )
+   (printi128,             void(int)       )
+   (printd,                void(int64_t)   )
+   (printn,                void(int64_t)   )
+   (printhex,              void(int, int)  )
+);
+
+REGISTER_INTRINSICS(transaction_api,
+   (read_transaction,       int(int, int)            )
+   (transaction_size,       int()                    )
+   (expiration,             int()                    )
+   (tapos_block_prefix,     int()                    )
+   (tapos_block_num,        int()                    )
+   (send_inline,           void(int, int)            )
+   (send_deferred,         void(int, int, int, int)  )
+);
+
+REGISTER_INTRINSICS(memory_api,
+   (memcpy,                 int(int, int, int)   )
+   (memmove,                int(int, int, int)   )
+   (memcmp,                 int(int, int, int)   )
+   (memset,                 int(int, int, int)   )
+   (sbrk,                   int(int)             )
+);
+
+
+#define DB_METHOD_SEQ(SUFFIX) \
+   (store,        int32_t(int64_t, int64_t, int64_t, int, int),   "store_"#SUFFIX ) \
+   (update,       int32_t(int64_t, int64_t, int64_t, int, int),   "update_"#SUFFIX ) \
+   (remove,       int32_t(int64_t, int64_t, int),                 "remove_"#SUFFIX )
+
+#define DB_INDEX_METHOD_SEQ(SUFFIX)\
+   (load,         int32_t(int64_t, int64_t, int64_t, int, int),   "load_"#SUFFIX )\
+   (front,        int32_t(int64_t, int64_t, int64_t, int, int),   "front_"#SUFFIX )\
+   (back,         int32_t(int64_t, int64_t, int64_t, int, int),   "back_"#SUFFIX )\
+   (previous,     int32_t(int64_t, int64_t, int64_t, int, int),   "previous_"#SUFFIX )\
+   (lower_bound,  int32_t(int64_t, int64_t, int64_t, int, int),   "lower_bound_"#SUFFIX )\
+   (upper_bound,  int32_t(int64_t, int64_t, int64_t, int, int),   "upper_bound_"#SUFFIX )\
+
+using db_api_key_value_object                                 = db_api<key_value_object>;
+using db_api_keystr_value_object                              = db_api<keystr_value_object>;
+using db_api_key128x128_value_object                          = db_api<key128x128_value_object>;
+using db_api_key64x64_value_object                            = db_api<key64x64_value_object>;
+using db_api_key64x64x64_value_object                         = db_api<key64x64x64_value_object>;
+using db_index_api_key_value_index_by_scope_primary           = db_index_api<key_value_index,by_scope_primary>;
+using db_index_api_keystr_value_index_by_scope_primary        = db_index_api<keystr_value_index,by_scope_primary>;
+using db_index_api_key128x128_value_index_by_scope_primary    = db_index_api<key128x128_value_index,by_scope_primary>;
+using db_index_api_key128x128_value_index_by_scope_secondary  = db_index_api<key128x128_value_index,by_scope_secondary>;
+using db_index_api_key64x64_value_index_by_scope_primary      = db_index_api<key64x64_value_index,by_scope_primary>;
+using db_index_api_key64x64_value_index_by_scope_secondary    = db_index_api<key64x64_value_index,by_scope_secondary>;
+using db_index_api_key64x64x64_value_index_by_scope_primary   = db_index_api<key64x64x64_value_index,by_scope_primary>;
+using db_index_api_key64x64x64_value_index_by_scope_secondary = db_index_api<key64x64x64_value_index,by_scope_secondary>;
+using db_index_api_key64x64x64_value_index_by_scope_tertiary  = db_index_api<key64x64x64_value_index,by_scope_tertiary>;
+
+REGISTER_INTRINSICS(db_api_key_value_object,         DB_METHOD_SEQ(i64));
+REGISTER_INTRINSICS(db_api_keystr_value_object,      DB_METHOD_SEQ(str));
+REGISTER_INTRINSICS(db_api_key128x128_value_object,  DB_METHOD_SEQ(i128i128));
+REGISTER_INTRINSICS(db_api_key64x64_value_object,    DB_METHOD_SEQ(i64i64));
+REGISTER_INTRINSICS(db_api_key64x64x64_value_object, DB_METHOD_SEQ(i64i64i64));
+
+REGISTER_INTRINSICS(db_index_api_key_value_index_by_scope_primary,           DB_INDEX_METHOD_SEQ(i64));
+REGISTER_INTRINSICS(db_index_api_keystr_value_index_by_scope_primary,        DB_INDEX_METHOD_SEQ(str));
+REGISTER_INTRINSICS(db_index_api_key128x128_value_index_by_scope_primary,    DB_INDEX_METHOD_SEQ(primary_i128i128));
+REGISTER_INTRINSICS(db_index_api_key128x128_value_index_by_scope_secondary,  DB_INDEX_METHOD_SEQ(secondary_i128i128));
+REGISTER_INTRINSICS(db_index_api_key64x64_value_index_by_scope_primary,      DB_INDEX_METHOD_SEQ(primary_i64i64));
+REGISTER_INTRINSICS(db_index_api_key64x64_value_index_by_scope_secondary,    DB_INDEX_METHOD_SEQ(secondary_i64i64));
+REGISTER_INTRINSICS(db_index_api_key64x64x64_value_index_by_scope_primary,   DB_INDEX_METHOD_SEQ(primary_i64i64i64));
+REGISTER_INTRINSICS(db_index_api_key64x64x64_value_index_by_scope_secondary, DB_INDEX_METHOD_SEQ(secondary_i64i64i64));
+REGISTER_INTRINSICS(db_index_api_key64x64x64_value_index_by_scope_tertiary,  DB_INDEX_METHOD_SEQ(tertiary_i64i64i64));
+
+
+} } /// eosio::chain
