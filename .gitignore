@@ -75,3 +75,11 @@ build-debug/*
 tn_data_*
 .vscode
 .DS_Store
+eos_sionnow0.PO
+eos_sionnow0.PS
+eos_sionnow0.PR
+eos_sionnow0.PFI
+eos_sionnow0.IMD
+eos_sionnow0.IMB
+eos_sionnow0.IAD
+eos_sionnow0.IAB
