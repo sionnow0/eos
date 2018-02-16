@@ -90,6 +90,7 @@ cd eos
 
 Now you can proceed to the next step - [Creating and launching a single-node testnet](#singlenode)
 
+
 <a name="autoubuntupublic"></a>
 #### Clean install Ubuntu 16.10 for the public testnet
 
