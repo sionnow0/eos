@@ -90,7 +90,7 @@ void chain_plugin::set_program_options(options_description& cli, options_descrip
 }
 
 void chain_plugin::plugin_initialize(const variables_map& options) {
-   ilog("initializing chain plugin");
+   ilog("initializing chain plugin");  //sion: program will print when start eosd
 
    if(options.count("genesis-json")) {
       my->genesis_file = options.at("genesis-json").as<bfs::path>();
@@ -128,6 +128,7 @@ void chain_plugin::plugin_initialize(const variables_map& options) {
       fc::remove_all(app().data_dir() / default_shared_memory_dir);
       fc::remove_all(my->block_log_dir);
    }
+   
    if (options.at("skip-transaction-signatures").as<bool>()) {
       ilog("Setting skip_transaction_signatures");
       elog("Setting skip_transaction_signatures\n"
@@ -166,7 +167,8 @@ void chain_plugin::plugin_initialize(const variables_map& options) {
 }
 
 void chain_plugin::plugin_startup()
-{ try {
+{ 
+try {
    FC_ASSERT( fc::exists( my->genesis_file ),
               "unable to find genesis file '${f}', check --genesis-json argument", 
               ("f",my->genesis_file.generic_string()) );
@@ -198,7 +200,9 @@ void chain_plugin::plugin_startup()
 
    my->chain_config.reset();
 
-   } FC_CAPTURE_AND_RETHROW( (my->genesis_file.generic_string()) ) }
+   } FC_CAPTURE_AND_RETHROW( (my->genesis_file.generic_string()) ) 
+
+}
 
 void chain_plugin::plugin_shutdown() {
    my->chain.reset();
