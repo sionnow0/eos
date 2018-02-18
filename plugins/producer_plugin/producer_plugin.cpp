@@ -131,11 +131,15 @@ if( options.count(name) ) { \
    std::copy(ops.begin(), ops.end(), std::inserter(container, container.end())); \
 }
 
+//sion producer_plugin is so simple
 void producer_plugin::plugin_initialize(const boost::program_options::variables_map& options)
 { try {
    my->_options = &options;
+   //sion set producer name
    LOAD_VALUE_SET(options, "producer-name", my->_producers, types::account_name)
 
+	//config.ini Tuple of [public key, WIF private key] (may specify multiple times)
+	//config.ini private-key = ["EOS6MRyAjQq8ud7hVNYcfnVPJqcVpscN5So8BhtHuGYqET5GDW5CV","5KQwrPbwdL6PhXujxW37FSSQZ1JiwsST4cqQzDeyXtP79zkvFD3"]
    if( options.count("private-key") )
    {
       const std::vector<std::string> key_id_to_wif_pair_strings = options["private-key"].as<std::vector<std::string>>();
@@ -147,6 +151,29 @@ void producer_plugin::plugin_initialize(const boost::program_options::variables_
    }
 } FC_LOG_AND_RETHROW() }
 
+/*
+sion search from symbol:
+#define FC_LOG_AND_RETHROW( )  \
+   catch( fc::exception& er ) { \
+      wlog( "${details}", ("details",er.to_detail_string()) ); \
+      FC_RETHROW_EXCEPTION( er, warn, "rethrow" ); \
+   } catch( const std::exception& e ) {  \
+      fc::exception fce( \
+                FC_LOG_MESSAGE( warn, "rethrow ${what}: ", ("what",e.what())), \
+                fc::std_exception_code,\
+                BOOST_CORE_TYPEID(e).name(), \
+                e.what() ) ; \
+      wlog( "${details}", ("details",fce.to_detail_string()) ); \
+      throw fce;\
+   } catch( ... ) {  \
+      fc::unhandled_exception e( \
+                FC_LOG_MESSAGE( warn, "rethrow"), \
+                std::current_exception() ); \
+      wlog( "${details}", ("details",e.to_detail_string()) ); \
+      throw e; \
+   }
+*/
+
 void producer_plugin::plugin_startup()
 { try {
    ilog("producer plugin:  plugin_startup() begin");
@@ -154,6 +181,7 @@ void producer_plugin::plugin_startup()
 
    if (!my->_producers.empty())
    {
+   		// running: producer_plugin.cpp:186       plugin_startup       ] Launching block production for 21 producers.
       ilog("Launching block production for ${n} producers.", ("n", my->_producers.size()));
       if(my->_production_enabled)
       {

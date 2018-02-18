@@ -111,7 +111,7 @@ void chain_plugin::plugin_initialize(const variables_map& options) {
        my->genesis_timestamp = time_point::from_iso_string (tstr);
      }
    }
-   if (options.count("block-log-dir")) {
+   if (options.count("block-log-dir")) {  //block-log-dir = "blocks"  relative path to application data dir, by sion
       auto bld = options.at("block-log-dir").as<bfs::path>();
       if(bld.is_relative())
          my->block_log_dir = app().data_dir() / bld;
@@ -175,6 +175,8 @@ try {
    my->chain_config->block_log_dir = my->block_log_dir;
    my->chain_config->shared_memory_dir = app().data_dir() / default_shared_memory_dir;
    my->chain_config->read_only = my->readonly;
+
+   //sion how can transform json to genesis here? great jobs.
    my->chain_config->genesis = fc::json::from_file(my->genesis_file).as<contracts::genesis_state_type>();
    if (my->genesis_timestamp.sec_since_epoch() > 0) {
       my->chain_config->genesis.initial_timestamp = my->genesis_timestamp;
@@ -188,13 +190,19 @@ try {
       my->chain_config->limits.max_push_transaction_us = fc::milliseconds(my->max_pending_transaction_time_ms);
    }
 
+   //sion boost emplace function
    my->chain.emplace(*my->chain_config);
 
    if(!my->readonly) {
+   	  //sion enter here
       ilog("starting chain in read/write mode");
+	  // Pairs of [BLOCK_NUM,BLOCK_ID] that should be enforced as checkpoints.
+	  // See genesis.json
       my->chain->add_checkpoints(my->loaded_checkpoints);
    }
 
+	//sion blockchain db: search symbol: database(class)
+	// runing: Blockchain started; head block is #0, genesis timestamp is 201
    ilog("Blockchain started; head block is #${num}, genesis timestamp is ${ts}",
         ("num", my->chain->head_block_num())("ts", (std::string)my->chain_config->genesis.initial_timestamp));
 

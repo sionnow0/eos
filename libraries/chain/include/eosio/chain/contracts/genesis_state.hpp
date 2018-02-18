@@ -17,6 +17,7 @@ namespace eosio { namespace chain { namespace contracts {
 
 struct genesis_state_type {
    chain_config   initial_configuration = {
+      // sion why the var has a . before var name ?
       .target_block_size              = config::default_target_block_size,
       .max_block_size                 = config::default_max_block_size,
       .target_block_acts_per_scope    = config::default_target_block_acts_per_scope,

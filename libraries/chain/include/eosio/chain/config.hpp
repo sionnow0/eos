@@ -43,6 +43,7 @@ static const uint32_t blocksize_average_window_ms   = 60*1000l;
 
 
 const static uint32_t   default_max_block_size              = 1024 * 1024; /// at 500ms blocks and 200byte trx, this enables 10,000 TPS burst
+//sion 20180217: now target is 1000 tps, but the white paper is 100w ? multi thread can scale it ?
 const static uint32_t   default_target_block_size           = default_max_block_size / 10; /// we target 1000 TPS burst
 const static uint32_t   default_target_block_acts_per_scope  = 1000;
 const static uint32_t   default_max_block_acts_per_scope     = default_target_block_acts_per_scope*10;
