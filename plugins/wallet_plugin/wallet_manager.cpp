@@ -81,6 +81,7 @@ void wallet_manager::open(const std::string& name) {
 }
 
 std::vector<std::string> wallet_manager::list_wallets() {
+	//sion: list wallets
    check_timeout();
    std::vector<std::string> result;
    for (const auto& i : wallets) {

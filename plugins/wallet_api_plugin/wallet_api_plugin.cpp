@@ -71,6 +71,8 @@ void wallet_api_plugin::plugin_startup() {
    // lifetime of plugin is lifetime of application
    auto& wallet_mgr = app().get_plugin<wallet_plugin>().get_wallet_manager();
 
+
+	//sion: eosd wallet rest api register in here
    app().get_plugin<http_plugin>().add_api({
        CALL(wallet, wallet_mgr, set_timeout,
             INVOKE_V_R(wallet_mgr, set_timeout, int64_t), 200),

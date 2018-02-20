@@ -126,6 +126,7 @@ uint32_t port = 8888;
 string wallet_host = "localhost";
 uint32_t wallet_port = 8888;
 
+
 const string chain_func_base = "/v1/chain";
 const string get_info_func = chain_func_base + "/get_info";
 const string push_txn_func = chain_func_base + "/push_transaction";
@@ -705,6 +706,7 @@ int main( int argc, char** argv ) {
    contractSubcommand->add_flag("-s,--skip-sign", skip_sign, localized("Specify if unlocked wallet keys should be used to sign transaction"));
    add_standard_transaction_options(contractSubcommand);
    contractSubcommand->set_callback([&] {
+   		//sion eosc commond of dealing wast file in here
       std::string wast;
       std::cout << localized("Reading WAST...") << std::endl;
       fc::read_file_contents(wastPath, wast);
@@ -717,6 +719,7 @@ int main( int argc, char** argv ) {
       }
       else {
          std::cout << localized("Assembling WASM...") << std::endl;
+		 //sion read the wasm file and assembling wast to wasm
          wasm = assemble_wast(wast);
       }
 
@@ -901,6 +904,7 @@ int main( int argc, char** argv ) {
    // list wallets
    auto listWallet = wallet->add_subcommand("list", localized("List opened wallets, * = unlocked"), false);
    listWallet->set_callback([] {
+   		//sion eosc command call funciton in here
       std::cout << localized("Wallets:") << std::endl;
       const auto& v = call(wallet_host, wallet_port, wallet_list);
       std::cout << fc::json::to_pretty_string(v) << std::endl;
@@ -934,6 +938,7 @@ int main( int argc, char** argv ) {
    actionsSubcommand->add_flag("-s,--skip-sign", skip_sign, localized("Specify that unlocked wallet keys should not be used to sign transaction"));
    add_standard_transaction_options(actionsSubcommand);
    actionsSubcommand->set_callback([&] {
+   		//sion ./eosc push message currency transfer '{"from":"currency","to":"inita","quantity":50}' --scope currency,inita --permission currency@active
       ilog("Converting argument to binary...");
       fc::variant action_args_var;
       try {
@@ -941,9 +946,9 @@ int main( int argc, char** argv ) {
       } EOS_CAPTURE_AND_RETHROW(action_type_exception, "Fail to parse action JSON")
 
       auto arg= fc::mutable_variant_object
-                ("code", contract)
-                ("action", action)
-                ("args", action_args_var);
+                ("code", contract)	//currency
+                ("action", action)  // transfer
+                ("args", action_args_var); //'{"from":"currency","to":"inita","quantity":50}'
       auto result = call(json_to_bin_func, arg);
 
       auto accountPermissions = get_account_permissions(permissions);

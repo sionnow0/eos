@@ -123,7 +123,7 @@ struct setcode {
    account_name                     account;
    uint8                            vmtype;
    uint8                            vmversion;
-   bytes                            code;
+   bytes                            code;	//sion eosc wasm bytes set in this variable
 
    static account_name get_account() {
       return config::system_account_name;
@@ -136,7 +136,7 @@ struct setcode {
 
 struct setabi {
    account_name                     account;
-   abi_def                          abi;
+   abi_def                          abi;  //sion eosc abi set in this variable
 
    static account_name get_account() {
       return config::system_account_name;

@@ -195,6 +195,7 @@ void producer_plugin::plugin_startup()
    ilog("producer plugin:  plugin_startup() end");
    } FC_CAPTURE_AND_RETHROW() }
 
+//sion 20180220
 void producer_plugin::plugin_shutdown() {
    try {
       my->_timer.cancel();

@@ -575,7 +575,7 @@ inline std::string inijoin(std::vector<std::string> args) {
         auto it = std::find_if(arg.begin(), arg.end(), [](char ch) { return std::isspace<char>(ch, std::locale()); });
         if(it == arg.end())
             s << arg;
-        else if(arg.find(R"(")") == std::string::npos)
+        else if(arg.find(R"(")") == std::string::npos) //" //here is so strange, what is the R"(")"   
             s << R"(")" << arg << R"(")";
         else
             s << R"(')" << arg << R"(')";

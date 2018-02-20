@@ -64,6 +64,9 @@ public:
    /// @throws fc::exception if unable to find/open the wallet file.
    void open(const std::string& name);
 
+
+	//sion operator wallet api in here
+
    /// @return A list of wallet names with " *" appended if the wallet is unlocked.
    std::vector<std::string> list_wallets();
 
