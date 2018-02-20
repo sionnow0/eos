@@ -127,6 +127,7 @@ string wallet_host = "localhost";
 uint32_t wallet_port = 8888;
 
 
+//sion all http rest api define of eosc
 const string chain_func_base = "/v1/chain";
 const string get_info_func = chain_func_base + "/get_info";
 const string push_txn_func = chain_func_base + "/push_transaction";
