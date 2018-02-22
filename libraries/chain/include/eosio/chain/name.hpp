@@ -13,6 +13,10 @@ namespace eosio { namespace chain {
       return 0;
    }
 
+
+	//sion a hash of transfroming string to uint64_t
+	//sion what will happen if hash conflict ?
+	//sion maybe should code and action all conflict, the probability is very small
    static constexpr uint64_t string_to_name( const char* str ) {
 
       uint32_t len = 0;

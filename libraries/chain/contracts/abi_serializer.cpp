@@ -79,6 +79,8 @@ namespace eosio { namespace chain { namespace contracts {
       built_in_types.emplace("int16",                     pack_unpack<int16_t>());
       built_in_types.emplace("int32",                     pack_unpack<int32_t>());
       built_in_types.emplace("int64",                     pack_unpack<int64_t>());
+
+	  //sion N(currency) here, the define N() is in the pack_unpack<name>()
       built_in_types.emplace("name",                      pack_unpack<name>());
       built_in_types.emplace("field",                     pack_unpack<field_def>());
       built_in_types.emplace("struct_def",                pack_unpack<struct_def>());
