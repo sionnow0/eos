@@ -65,6 +65,7 @@ using namespace eosio;
      eosio::detail::net_api_plugin_empty result;
 
 
+//sion rest api: connect etc.
 void net_api_plugin::plugin_startup() {
    ilog("starting net_api_plugin");
    // lifetime of plugin is lifetime of application

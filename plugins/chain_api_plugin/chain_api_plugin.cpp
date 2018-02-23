@@ -58,6 +58,8 @@ void chain_api_plugin::plugin_initialize(const variables_map&) {}
 #define CHAIN_RO_CALL(call_name, http_response_code) CALL(chain, ro_api, chain_apis::read_only, call_name, http_response_code)
 #define CHAIN_RW_CALL(call_name, http_response_code) CALL(chain, rw_api, chain_apis::read_write, call_name, http_response_code)
 
+
+//sion http rest api of block etc.
 void chain_api_plugin::plugin_startup() {
    ilog( "starting chain_api_plugin" );
    my.reset(new chain_api_plugin_impl(app().get_plugin<chain_plugin>().chain()));
